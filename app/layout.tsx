@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ChaCha — two cups, two tongues",
+  title: "ChaChat — two cups, two tongues",
   description:
     "Pass-the-phone voice translation between two speakers — English, Cantonese, Mandarin, Japanese, Spanish, and French.",
 };

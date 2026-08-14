@@ -74,7 +74,7 @@ export default function SetupScreen({
     <div className="mx-auto flex w-full max-w-md flex-1 flex-col gap-8 px-5 py-10">
       <header>
         <h1 className="text-4xl font-bold tracking-tight">
-          🍵 ChaCha
+          🍵 ChaChat
         </h1>
         <p className="mt-1 text-sm font-medium text-slate-500 dark:text-slate-400">
           Two cups, two tongues.

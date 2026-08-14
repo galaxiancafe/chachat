@@ -1,12 +1,12 @@
-# 🍵 ChaCha
+# 🍵 ChaChat
 
 *Two cups, two tongues.*
 
 Pass-the-phone voice translation between two people speaking different
 languages. One device, one screen, two big buttons.
 
-The name is 茶 (*cha* — tea in Cantonese, Mandarin, and Japanese) crossed with
-*chat*: a little table where two languages meet.
+The name is 茶 (*cha* — tea in Cantonese, Mandarin, and Japanese) + *chat*: a
+little table where two languages meet.
 
 Supported languages: **English, Cantonese (廣東話), Mandarin (普通话), Japanese
 (日本語), Spanish (Español), French (Français)**.
