@@ -44,6 +44,11 @@ function getCtor(): SpeechRecognitionCtor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
+function isMobile(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+}
+
 const ERROR_MESSAGES: Record<string, string> = {
   "not-allowed":
     "Microphone access was blocked. Allow the mic for this site and try again.",
@@ -54,6 +59,14 @@ const ERROR_MESSAGES: Record<string, string> = {
   "language-not-supported":
     "This browser has no speech model for that language. Chrome on desktop or Android has the widest coverage.",
 };
+
+// Errors after which retrying is pointless — stop the keep-alive loop.
+const FATAL_ERRORS = new Set([
+  "not-allowed",
+  "service-not-allowed",
+  "audio-capture",
+  "language-not-supported",
+]);
 
 export interface UseSpeech {
   /** null until mounted, then whether the browser exposes SpeechRecognition */
@@ -70,8 +83,15 @@ export interface UseSpeech {
 
 /**
  * Wraps SpeechRecognition as a one-mic-at-a-time recorder. A session runs from
- * `start` until `stop` (or until the browser ends it on a long silence); the
- * accumulated final transcript is then handed to `onUtterance`.
+ * `start` until `stop`, and the accumulated transcript is handed to
+ * `onUtterance` as a single utterance.
+ *
+ * The wrinkle this handles: Android Chrome ends recognition after every pause
+ * (it ignores `continuous`), which on a phone looks like "the mic doesn't
+ * work." So while the user still wants to be heard, we transparently restart
+ * the recognizer on each `onend` and keep appending to one transcript. Desktop
+ * keeps `continuous = true` and rarely needs the restart, but it's harmless
+ * there too.
  */
 export function useSpeech(
   onUtterance: (side: Side, text: string) => void
@@ -84,80 +104,144 @@ export function useSpeech(
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const finalRef = useRef("");
   const sideRef = useRef<Side | null>(null);
+  const langRef = useRef("");
+  // True from `start` until the user (or a fatal error) stops the session.
+  const wantRef = useRef(false);
+  const restartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onUtteranceRef = useRef(onUtterance);
   onUtteranceRef.current = onUtterance;
 
+  const clearRestart = () => {
+    if (restartRef.current) {
+      clearTimeout(restartRef.current);
+      restartRef.current = null;
+    }
+  };
+
+  const finalize = useCallback(() => {
+    const text = finalRef.current.trim();
+    const side = sideRef.current;
+    finalRef.current = "";
+    sideRef.current = null;
+    recRef.current = null;
+    wantRef.current = false;
+    clearRestart();
+    setListeningSide(null);
+    setInterim("");
+    if (text && side) onUtteranceRef.current(side, text);
+  }, []);
+
   useEffect(() => {
     setSupported(getCtor() !== null);
-    return () => recRef.current?.abort();
+    return () => {
+      wantRef.current = false;
+      clearRestart();
+      recRef.current?.abort();
+    };
   }, []);
 
   const stop = useCallback(() => {
-    recRef.current?.stop();
-  }, []);
-
-  const start = useCallback((side: Side, speechLang: string) => {
-    const Ctor = getCtor();
-    if (!Ctor) {
-      setSupported(false);
-      return;
-    }
-    // Never let two sessions overlap: the previous mic is torn down silently.
-    recRef.current?.abort();
-
-    const rec = new Ctor();
-    rec.lang = speechLang;
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.maxAlternatives = 1;
-
-    finalRef.current = "";
-    sideRef.current = side;
-
-    rec.onresult = (event) => {
-      let pending = "";
-      for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        const result = event.results[i];
-        const text = result[0].transcript;
-        if (result.isFinal) finalRef.current += text;
-        else pending += text;
-      }
-      setInterim(pending);
-    };
-
-    rec.onerror = (event) => {
-      // `aborted` is what we trigger ourselves on teardown; `no-speech` just
-      // means the speaker stayed quiet. Neither is worth alarming anyone about.
-      if (event.error === "aborted" || event.error === "no-speech") return;
-      setError(
-        ERROR_MESSAGES[event.error] ?? `Speech recognition failed (${event.error}).`
-      );
-    };
-
-    rec.onend = () => {
-      const text = finalRef.current.trim();
-      const endedSide = sideRef.current;
-      finalRef.current = "";
-      sideRef.current = null;
-      recRef.current = null;
-      setListeningSide(null);
-      setInterim("");
-      if (text && endedSide) onUtteranceRef.current(endedSide, text);
-    };
-
-    recRef.current = rec;
-    setError(null);
-    setInterim("");
-    setListeningSide(side);
-
+    // Signal intent first so the pending `onend` finalizes instead of restarting.
+    wantRef.current = false;
+    clearRestart();
     try {
-      rec.start();
+      recRef.current?.stop();
     } catch {
-      recRef.current = null;
-      setListeningSide(null);
-      setError("Could not start the microphone. Try again.");
+      finalize();
     }
-  }, []);
+  }, [finalize]);
+
+  const start = useCallback(
+    (side: Side, speechLang: string) => {
+      const Ctor = getCtor();
+      if (!Ctor) {
+        setSupported(false);
+        return;
+      }
+      // Tear down any prior session without emitting it.
+      wantRef.current = false;
+      clearRestart();
+      recRef.current?.abort();
+
+      finalRef.current = "";
+      sideRef.current = side;
+      langRef.current = speechLang;
+      wantRef.current = true;
+
+      const mobile = isMobile();
+
+      const build = (): SpeechRecognitionLike => {
+        const rec = new Ctor();
+        rec.lang = langRef.current;
+        // Android ignores `continuous` and stops after each phrase, so on mobile
+        // we lean on the restart loop instead of fighting it.
+        rec.continuous = !mobile;
+        rec.interimResults = true;
+        rec.maxAlternatives = 1;
+
+        rec.onresult = (event) => {
+          let pending = "";
+          for (let i = event.resultIndex; i < event.results.length; i += 1) {
+            const result = event.results[i];
+            const text = result[0].transcript;
+            if (result.isFinal) finalRef.current += text;
+            else pending += text;
+          }
+          setInterim(pending);
+        };
+
+        rec.onerror = (event) => {
+          // `aborted` is our own teardown; `no-speech` just means silence — let
+          // the keep-alive loop carry on. Fatal errors stop it and surface.
+          if (event.error === "aborted" || event.error === "no-speech") return;
+          if (FATAL_ERRORS.has(event.error)) wantRef.current = false;
+          setError(
+            ERROR_MESSAGES[event.error] ??
+              `Speech recognition failed (${event.error}).`
+          );
+        };
+
+        rec.onend = () => {
+          setInterim("");
+          if (!wantRef.current) {
+            finalize();
+            return;
+          }
+          // Still listening: the phone ended the phrase, so start a fresh
+          // recognizer and keep the same running transcript.
+          restartRef.current = setTimeout(() => {
+            if (!wantRef.current) {
+              finalize();
+              return;
+            }
+            try {
+              recRef.current = build();
+              recRef.current.start();
+            } catch {
+              finalize();
+            }
+          }, 150);
+        };
+
+        return rec;
+      };
+
+      setError(null);
+      setInterim("");
+      setListeningSide(side);
+
+      try {
+        recRef.current = build();
+        recRef.current.start();
+      } catch {
+        recRef.current = null;
+        wantRef.current = false;
+        setListeningSide(null);
+        setError("Could not start the microphone. Try again.");
+      }
+    },
+    [finalize]
+  );
 
   const clearError = useCallback(() => setError(null), []);
 
