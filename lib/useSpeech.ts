@@ -68,6 +68,12 @@ const FATAL_ERRORS = new Set([
   "language-not-supported",
 ]);
 
+// Bounds on the keep-alive restart loop, so it can never spin forever if the
+// device's speech engine ends instantly or never catches anything (e.g. a phone
+// with no acoustic model for the chosen language).
+const MAX_SESSION_MS = 30000; // hard cap on one tap-to-stop session
+const MAX_IDLE_RESTARTS = 8; // consecutive restarts with no new words → give up
+
 export interface UseSpeech {
   /** null until mounted, then whether the browser exposes SpeechRecognition */
   supported: boolean | null;
@@ -108,13 +114,21 @@ export function useSpeech(
   // True from `start` until the user (or a fatal error) stops the session.
   const wantRef = useRef(false);
   const restartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionStartRef = useRef(0);
+  const lastLenRef = useRef(0);
+  const idleRestartsRef = useRef(0);
   const onUtteranceRef = useRef(onUtterance);
   onUtteranceRef.current = onUtterance;
 
-  const clearRestart = () => {
+  const clearTimers = () => {
     if (restartRef.current) {
       clearTimeout(restartRef.current);
       restartRef.current = null;
+    }
+    if (sessionTimerRef.current) {
+      clearTimeout(sessionTimerRef.current);
+      sessionTimerRef.current = null;
     }
   };
 
@@ -125,7 +139,7 @@ export function useSpeech(
     sideRef.current = null;
     recRef.current = null;
     wantRef.current = false;
-    clearRestart();
+    clearTimers();
     setListeningSide(null);
     setInterim("");
     if (text && side) onUtteranceRef.current(side, text);
@@ -135,7 +149,7 @@ export function useSpeech(
     setSupported(getCtor() !== null);
     return () => {
       wantRef.current = false;
-      clearRestart();
+      clearTimers();
       recRef.current?.abort();
     };
   }, []);
@@ -143,7 +157,7 @@ export function useSpeech(
   const stop = useCallback(() => {
     // Signal intent first so the pending `onend` finalizes instead of restarting.
     wantRef.current = false;
-    clearRestart();
+    clearTimers();
     try {
       recRef.current?.stop();
     } catch {
@@ -160,13 +174,16 @@ export function useSpeech(
       }
       // Tear down any prior session without emitting it.
       wantRef.current = false;
-      clearRestart();
+      clearTimers();
       recRef.current?.abort();
 
       finalRef.current = "";
       sideRef.current = side;
       langRef.current = speechLang;
       wantRef.current = true;
+      sessionStartRef.current = Date.now();
+      lastLenRef.current = 0;
+      idleRestartsRef.current = 0;
 
       const mobile = isMobile();
 
@@ -207,6 +224,29 @@ export function useSpeech(
             finalize();
             return;
           }
+          // Count restarts that gained no new words; reset when they do. This
+          // catches an engine that ends instantly and would otherwise spin.
+          if (finalRef.current.length > lastLenRef.current) {
+            lastLenRef.current = finalRef.current.length;
+            idleRestartsRef.current = 0;
+          } else {
+            idleRestartsRef.current += 1;
+          }
+
+          const timedOut = Date.now() - sessionStartRef.current > MAX_SESSION_MS;
+          const spinning = idleRestartsRef.current >= MAX_IDLE_RESTARTS;
+          if (timedOut || spinning) {
+            wantRef.current = false;
+            // Only nag if we never caught anything — otherwise just wrap up.
+            if (finalRef.current.trim().length === 0) {
+              setError(
+                "Didn't catch any speech. Tap and speak again — check the mic is allowed and the selected language matches what you're speaking."
+              );
+            }
+            finalize();
+            return;
+          }
+
           // Still listening: the phone ended the phrase, so start a fresh
           // recognizer and keep the same running transcript.
           restartRef.current = setTimeout(() => {
@@ -229,6 +269,10 @@ export function useSpeech(
       setError(null);
       setInterim("");
       setListeningSide(side);
+      // Absolute ceiling: even if `onend` never fires, end the session.
+      sessionTimerRef.current = setTimeout(() => {
+        if (wantRef.current) stop();
+      }, MAX_SESSION_MS + 1000);
 
       try {
         recRef.current = build();
@@ -240,7 +284,7 @@ export function useSpeech(
         setError("Could not start the microphone. Try again.");
       }
     },
-    [finalize]
+    [finalize, stop]
   );
 
   const clearError = useCallback(() => setError(null), []);
