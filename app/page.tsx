@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChatScreen from "@/components/ChatScreen";
+import DebugPanel from "@/components/DebugPanel";
 import SetupScreen from "@/components/SetupScreen";
 import {
   OTHER,
@@ -27,6 +28,11 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>("both");
   const [engine, setEngine] = useState<string | null>(null);
+  const [debug, setDebug] = useState(false);
+
+  useEffect(() => {
+    setDebug(new URLSearchParams(window.location.search).has("debug"));
+  }, []);
 
   const langs = useMemo<Record<Side, Language>>(
     () => ({ A: getLanguage(codes.A), B: getLanguage(codes.B) }),
@@ -151,23 +157,27 @@ export default function Home() {
           onStart={handleStart}
           speechSupported={speech.supported}
         />
+        {debug && <DebugPanel events={speech.events} />}
       </div>
     );
   }
 
   return (
-    <ChatScreen
-      langs={langs}
-      messages={messages}
-      viewMode={viewMode}
-      setViewMode={setViewMode}
-      listeningSide={speech.listeningSide}
-      interim={speech.interim}
-      error={speech.error}
-      engine={engine}
-      onRecord={handleRecord}
-      onRetry={handleRetry}
-      onEnd={handleEnd}
-    />
+    <>
+      <ChatScreen
+        langs={langs}
+        messages={messages}
+        viewMode={viewMode}
+        setViewMode={setViewMode}
+        listeningSide={speech.listeningSide}
+        interim={speech.interim}
+        error={speech.error}
+        engine={engine}
+        onRecord={handleRecord}
+        onRetry={handleRetry}
+        onEnd={handleEnd}
+      />
+      {debug && <DebugPanel events={speech.events} />}
+    </>
   );
 }

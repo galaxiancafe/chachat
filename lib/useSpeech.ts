@@ -82,6 +82,8 @@ export interface UseSpeech {
   /** live, not-yet-final words for the active speaker */
   interim: string;
   error: string | null;
+  /** Rolling log of recognizer events, for the on-screen ?debug panel. */
+  events: string[];
   start(side: Side, speechLang: string): void;
   stop(): void;
   clearError(): void;
@@ -106,6 +108,12 @@ export function useSpeech(
   const [listeningSide, setListeningSide] = useState<Side | null>(null);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [events, setEvents] = useState<string[]>([]);
+
+  const log = useCallback((msg: string) => {
+    const stamp = new Date().toISOString().slice(11, 23);
+    setEvents((prev) => [...prev.slice(-30), `${stamp}  ${msg}`]);
+  }, []);
 
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const finalRef = useRef("");
@@ -146,13 +154,19 @@ export function useSpeech(
   }, []);
 
   useEffect(() => {
-    setSupported(getCtor() !== null);
+    const ok = getCtor() !== null;
+    setSupported(ok);
+    log(
+      `init: SpeechRecognition=${ok} mobile=${isMobile()} ua=${
+        typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 60) : "?"
+      }`
+    );
     return () => {
       wantRef.current = false;
       clearTimers();
       recRef.current?.abort();
     };
-  }, []);
+  }, [log]);
 
   const stop = useCallback(() => {
     // Signal intent first so the pending `onend` finalizes instead of restarting.
@@ -205,9 +219,11 @@ export function useSpeech(
             else pending += text;
           }
           setInterim(pending);
+          if (finalRef.current) log(`result: "${finalRef.current.slice(-40)}"`);
         };
 
         rec.onerror = (event) => {
+          log(`error: ${event.error}`);
           // `aborted` is our own teardown; `no-speech` just means silence — let
           // the keep-alive loop carry on. Fatal errors stop it and surface.
           if (event.error === "aborted" || event.error === "no-speech") return;
@@ -221,6 +237,7 @@ export function useSpeech(
         rec.onend = () => {
           setInterim("");
           if (!wantRef.current) {
+            log("end: stopping (finalize)");
             finalize();
             return;
           }
@@ -236,6 +253,7 @@ export function useSpeech(
           const timedOut = Date.now() - sessionStartRef.current > MAX_SESSION_MS;
           const spinning = idleRestartsRef.current >= MAX_IDLE_RESTARTS;
           if (timedOut || spinning) {
+            log(`give up: ${timedOut ? "timeout" : "no-progress"} idle=${idleRestartsRef.current}`);
             wantRef.current = false;
             // Only nag if we never caught anything — otherwise just wrap up.
             if (finalRef.current.trim().length === 0) {
@@ -249,6 +267,7 @@ export function useSpeech(
 
           // Still listening: the phone ended the phrase, so start a fresh
           // recognizer and keep the same running transcript.
+          log(`end: restart #${idleRestartsRef.current}`);
           restartRef.current = setTimeout(() => {
             if (!wantRef.current) {
               finalize();
@@ -257,7 +276,8 @@ export function useSpeech(
             try {
               recRef.current = build();
               recRef.current.start();
-            } catch {
+            } catch (e) {
+              log(`restart threw: ${e instanceof Error ? e.name : "?"}`);
               finalize();
             }
           }, 150);
@@ -269,6 +289,7 @@ export function useSpeech(
       setError(null);
       setInterim("");
       setListeningSide(side);
+      log(`start: ${side} lang=${speechLang} continuous=${!mobile}`);
       // Absolute ceiling: even if `onend` never fires, end the session.
       sessionTimerRef.current = setTimeout(() => {
         if (wantRef.current) stop();
@@ -277,17 +298,18 @@ export function useSpeech(
       try {
         recRef.current = build();
         recRef.current.start();
-      } catch {
+      } catch (e) {
+        log(`start threw: ${e instanceof Error ? e.name : "?"}`);
         recRef.current = null;
         wantRef.current = false;
         setListeningSide(null);
         setError("Could not start the microphone. Try again.");
       }
     },
-    [finalize, stop]
+    [finalize, stop, log]
   );
 
   const clearError = useCallback(() => setError(null), []);
 
-  return { supported, listeningSide, interim, error, start, stop, clearError };
+  return { supported, listeningSide, interim, error, events, start, stop, clearError };
 }
