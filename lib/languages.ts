@@ -29,10 +29,7 @@ export const LANGUAGES: Language[] = [
     code: "yue",
     label: "Cantonese",
     native: "廣東話",
-    // Google's speech engine reads "zh-HK" as Chinese/HK and runs its MANDARIN
-    // model, mis-hearing Cantonese as garbage. "yue-Hant-HK" is the dedicated
-    // Cantonese acoustic model. (Distinct from Mandarin's "zh-CN" below.)
-    speech: "yue-Hant-HK",
+    speech: "zh-HK",
     tts: ["zh-HK", "yue-Hant-HK", "zh-TW"],
     prompt:
       "Cantonese — spoken Hong Kong Cantonese written in Traditional Chinese characters " +
